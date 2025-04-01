@@ -1,0 +1,1961 @@
+<file_map>
+/Users/denis/Repos/o1-pro-template-system
+├── actions
+│   ├── db
+│   │   └── profiles-actions.ts
+│   └── stripe-actions.ts
+├── app
+│   ├── (auth)
+│   │   ├── login
+│   │   │   └── [[...login]]
+│   │   │       └── page.tsx
+│   │   ├── signup
+│   │   │   └── [[...signup]]
+│   │   │       └── page.tsx
+│   │   └── layout.tsx
+│   ├── (marketing)
+│   │   ├── about
+│   │   │   └── page.tsx
+│   │   ├── contact
+│   │   │   ├── _components
+│   │   │   │   └── contact-form.tsx
+│   │   │   └── page.tsx
+│   │   ├── features
+│   │   │   └── page.tsx
+│   │   ├── pricing
+│   │   │   └── page.tsx
+│   │   ├── layout.tsx
+│   │   └── page.tsx
+│   ├── api
+│   │   └── stripe
+│   │       └── webhooks
+│   │           └── route.ts
+│   ├── globals.css
+│   └── layout.tsx
+├── db
+│   ├── schema
+│   │   ├── index.ts
+│   │   └── profiles-schema.ts
+│   └── db.ts
+├── lib
+│   ├── hooks
+│   │   ├── use-copy-to-clipboard.tsx
+│   │   ├── use-mobile.tsx
+│   │   └── use-toast.ts
+│   ├── stripe.ts
+│   └── utils.ts
+├── types
+│   ├── index.ts
+│   └── server-action-types.ts
+├── .env.example
+├── .eslintrc.json
+├── components.json
+├── drizzle.config.ts
+├── license
+├── middleware.ts
+├── next.config.mjs
+├── package.json
+├── postcss.config.mjs
+├── prettier.config.cjs
+├── tailwind.config.ts
+└── tsconfig.json
+
+</file_map>
+
+<file_contents>
+File: /Users/denis/Repos/o1-pro-template-system/actions/db/profiles-actions.ts
+```ts
+/*
+Contains server actions related to profiles in the DB.
+*/
+
+"use server"
+
+import { db } from "@/db/db"
+import {
+  InsertProfile,
+  profilesTable,
+  SelectProfile
+} from "@/db/schema/profiles-schema"
+import { ActionState } from "@/types"
+import { eq } from "drizzle-orm"
+
+export async function createProfileAction(
+  data: InsertProfile
+): Promise<ActionState<SelectProfile>> {
+  try {
+    const [newProfile] = await db.insert(profilesTable).values(data).returning()
+    return {
+      isSuccess: true,
+      message: "Profile created successfully",
+      data: newProfile
+    }
+  } catch (error) {
+    console.error("Error creating profile:", error)
+    return { isSuccess: false, message: "Failed to create profile" }
+  }
+}
+
+export async function getProfileByUserIdAction(
+  userId: string
+): Promise<ActionState<SelectProfile>> {
+  try {
+    const profile = await db.query.profiles.findFirst({
+      where: eq(profilesTable.userId, userId)
+    })
+    if (!profile) {
+      return { isSuccess: false, message: "Profile not found" }
+    }
+
+    return {
+      isSuccess: true,
+      message: "Profile retrieved successfully",
+      data: profile
+    }
+  } catch (error) {
+    console.error("Error getting profile by user id", error)
+    return { isSuccess: false, message: "Failed to get profile" }
+  }
+}
+
+export async function updateProfileAction(
+  userId: string,
+  data: Partial<InsertProfile>
+): Promise<ActionState<SelectProfile>> {
+  try {
+    const [updatedProfile] = await db
+      .update(profilesTable)
+      .set(data)
+      .where(eq(profilesTable.userId, userId))
+      .returning()
+
+    if (!updatedProfile) {
+      return { isSuccess: false, message: "Profile not found to update" }
+    }
+
+    return {
+      isSuccess: true,
+      message: "Profile updated successfully",
+      data: updatedProfile
+    }
+  } catch (error) {
+    console.error("Error updating profile:", error)
+    return { isSuccess: false, message: "Failed to update profile" }
+  }
+}
+
+export async function updateProfileByStripeCustomerIdAction(
+  stripeCustomerId: string,
+  data: Partial<InsertProfile>
+): Promise<ActionState<SelectProfile>> {
+  try {
+    const [updatedProfile] = await db
+      .update(profilesTable)
+      .set(data)
+      .where(eq(profilesTable.stripeCustomerId, stripeCustomerId))
+      .returning()
+
+    if (!updatedProfile) {
+      return {
+        isSuccess: false,
+        message: "Profile not found by Stripe customer ID"
+      }
+    }
+
+    return {
+      isSuccess: true,
+      message: "Profile updated by Stripe customer ID successfully",
+      data: updatedProfile
+    }
+  } catch (error) {
+    console.error("Error updating profile by stripe customer ID:", error)
+    return {
+      isSuccess: false,
+      message: "Failed to update profile by Stripe customer ID"
+    }
+  }
+}
+
+export async function deleteProfileAction(
+  userId: string
+): Promise<ActionState<void>> {
+  try {
+    await db.delete(profilesTable).where(eq(profilesTable.userId, userId))
+    return {
+      isSuccess: true,
+      message: "Profile deleted successfully",
+      data: undefined
+    }
+  } catch (error) {
+    console.error("Error deleting profile:", error)
+    return { isSuccess: false, message: "Failed to delete profile" }
+  }
+}
+
+```
+
+File: /Users/denis/Repos/o1-pro-template-system/actions/stripe-actions.ts
+```ts
+/*
+Contains server actions related to Stripe.
+*/
+
+import {
+  updateProfileAction,
+  updateProfileByStripeCustomerIdAction
+} from "@/actions/db/profiles-actions"
+import { SelectProfile } from "@/db/schema"
+import { stripe } from "@/lib/stripe"
+import Stripe from "stripe"
+
+type MembershipStatus = SelectProfile["membership"]
+
+const getMembershipStatus = (
+  status: Stripe.Subscription.Status,
+  membership: MembershipStatus
+): MembershipStatus => {
+  switch (status) {
+    case "active":
+    case "trialing":
+      return membership
+    case "canceled":
+    case "incomplete":
+    case "incomplete_expired":
+    case "past_due":
+    case "paused":
+    case "unpaid":
+      return "free"
+    default:
+      return "free"
+  }
+}
+
+const getSubscription = async (subscriptionId: string) => {
+  return stripe.subscriptions.retrieve(subscriptionId, {
+    expand: ["default_payment_method"]
+  })
+}
+
+export const updateStripeCustomer = async (
+  userId: string,
+  subscriptionId: string,
+  customerId: string
+) => {
+  try {
+    if (!userId || !subscriptionId || !customerId) {
+      throw new Error("Missing required parameters for updateStripeCustomer")
+    }
+
+    const subscription = await getSubscription(subscriptionId)
+
+    const result = await updateProfileAction(userId, {
+      stripeCustomerId: customerId,
+      stripeSubscriptionId: subscription.id
+    })
+
+    if (!result.isSuccess) {
+      throw new Error("Failed to update customer profile")
+    }
+
+    return result.data
+  } catch (error) {
+    console.error("Error in updateStripeCustomer:", error)
+    throw error instanceof Error
+      ? error
+      : new Error("Failed to update Stripe customer")
+  }
+}
+
+export const manageSubscriptionStatusChange = async (
+  subscriptionId: string,
+  customerId: string,
+  productId: string
+): Promise<MembershipStatus> => {
+  try {
+    if (!subscriptionId || !customerId || !productId) {
+      throw new Error(
+        "Missing required parameters for manageSubscriptionStatusChange"
+      )
+    }
+
+    const subscription = await getSubscription(subscriptionId)
+    const product = await stripe.products.retrieve(productId)
+    const membership = product.metadata.membership as MembershipStatus
+
+    if (!["free", "pro"].includes(membership)) {
+      throw new Error(
+        `Invalid membership type in product metadata: ${membership}`
+      )
+    }
+
+    const membershipStatus = getMembershipStatus(
+      subscription.status,
+      membership
+    )
+
+    const updateResult = await updateProfileByStripeCustomerIdAction(
+      customerId,
+      { stripeSubscriptionId: subscription.id, membership: membershipStatus }
+    )
+
+    if (!updateResult.isSuccess) {
+      throw new Error("Failed to update subscription status")
+    }
+
+    return membershipStatus
+  } catch (error) {
+    console.error("Error in manageSubscriptionStatusChange:", error)
+    throw error instanceof Error
+      ? error
+      : new Error("Failed to update subscription status")
+  }
+}
+
+```
+
+File: /Users/denis/Repos/o1-pro-template-system/app/(auth)/signup/[[...signup]]/page.tsx
+```tsx
+/*
+This client page provides the signup form from Clerk.
+*/
+
+"use client"
+
+import { SignUp } from "@clerk/nextjs"
+import { dark } from "@clerk/themes"
+import { useTheme } from "next-themes"
+
+export default function SignUpPage() {
+  const { theme } = useTheme()
+
+  return (
+    <SignUp
+      forceRedirectUrl="/"
+      appearance={{ baseTheme: theme === "dark" ? dark : undefined }}
+    />
+  )
+}
+
+```
+
+File: /Users/denis/Repos/o1-pro-template-system/app/(marketing)/about/page.tsx
+```tsx
+/*
+This server page displays information about the company, mission, and team.
+*/
+
+"use server"
+
+import { Card, CardContent } from "@/components/ui/card"
+
+export default async function AboutPage() {
+  return (
+    <div className="container mx-auto py-12">
+      <h1 className="mb-8 text-center text-4xl font-bold">About Us</h1>
+
+      <div className="space-y-8">
+        <Card>
+          <CardContent className="pt-6">
+            <h2 className="mb-4 text-2xl font-semibold">Our Story</h2>
+            <p className="text-muted-foreground">
+              We are passionate about building tools that help people work
+              smarter and achieve more. Our platform combines cutting-edge
+              technology with intuitive design to create a seamless experience
+              for our users.
+            </p>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardContent className="pt-6">
+            <h2 className="mb-4 text-2xl font-semibold">Our Mission</h2>
+            <p className="text-muted-foreground">
+              Our mission is to empower individuals and organizations with
+              innovative solutions that drive productivity and success. We
+              believe in creating technology that adapts to how people work, not
+              the other way around.
+            </p>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardContent className="pt-6">
+            <h2 className="mb-4 text-2xl font-semibold">Core Values</h2>
+            <ul className="text-muted-foreground list-inside list-disc space-y-2">
+              <li>Innovation in everything we do</li>
+              <li>Customer success is our success</li>
+              <li>Transparency and trust</li>
+              <li>Continuous improvement</li>
+            </ul>
+          </CardContent>
+        </Card>
+      </div>
+    </div>
+  )
+}
+
+```
+
+File: /Users/denis/Repos/o1-pro-template-system/app/(marketing)/contact/_components/contact-form.tsx
+```tsx
+"use client"
+
+import { Button } from "@/components/ui/button"
+import {
+  Form,
+  FormControl,
+  FormField,
+  FormItem,
+  FormLabel,
+  FormMessage
+} from "@/components/ui/form"
+import { Input } from "@/components/ui/input"
+import { Textarea } from "@/components/ui/textarea"
+import { zodResolver } from "@hookform/resolvers/zod"
+import { useForm } from "react-hook-form"
+import * as z from "zod"
+
+const formSchema = z.object({
+  name: z.string().min(2, "Name must be at least 2 characters"),
+  email: z.string().email("Please enter a valid email address"),
+  message: z.string().min(10, "Message must be at least 10 characters")
+})
+
+export default function ContactForm() {
+  const form = useForm<z.infer<typeof formSchema>>({
+    resolver: zodResolver(formSchema),
+    defaultValues: { name: "", email: "", message: "" }
+  })
+
+  async function onSubmit(values: z.infer<typeof formSchema>) {
+    // In a real app, you would handle the form submission here
+    // For example, sending the data to your API route
+    console.log(values)
+  }
+
+  return (
+    <Form {...form}>
+      <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-6">
+        <FormField
+          control={form.control}
+          name="name"
+          render={({ field }) => (
+            <FormItem>
+              <FormLabel>Name</FormLabel>
+              <FormControl>
+                <Input placeholder="Your name" {...field} />
+              </FormControl>
+              <FormMessage />
+            </FormItem>
+          )}
+        />
+
+        <FormField
+          control={form.control}
+          name="email"
+          render={({ field }) => (
+            <FormItem>
+              <FormLabel>Email</FormLabel>
+              <FormControl>
+                <Input placeholder="you@example.com" type="email" {...field} />
+              </FormControl>
+              <FormMessage />
+            </FormItem>
+          )}
+        />
+
+        <FormField
+          control={form.control}
+          name="message"
+          render={({ field }) => (
+            <FormItem>
+              <FormLabel>Message</FormLabel>
+              <FormControl>
+                <Textarea
+                  placeholder="How can we help?"
+                  className="min-h-[120px]"
+                  {...field}
+                />
+              </FormControl>
+              <FormMessage />
+            </FormItem>
+          )}
+        />
+
+        <Button type="submit" className="w-full">
+          Send Message
+        </Button>
+      </form>
+    </Form>
+  )
+}
+
+```
+
+File: /Users/denis/Repos/o1-pro-template-system/app/(marketing)/contact/page.tsx
+```tsx
+/*
+This server page displays a contact form for users to get in touch.
+*/
+
+"use server"
+
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle
+} from "@/components/ui/card"
+import ContactForm from "./_components/contact-form"
+
+export default async function ContactPage() {
+  return (
+    <div className="container mx-auto max-w-5xl px-4 py-12">
+      <div className="mx-auto mb-12 max-w-2xl text-center">
+        <h1 className="mb-4 text-4xl font-bold">Contact Us</h1>
+        <p className="text-muted-foreground">
+          Have a question or need help? Get in touch with our team.
+        </p>
+      </div>
+
+      <Card className="mx-auto max-w-xl">
+        <CardHeader>
+          <CardTitle>Send us a message</CardTitle>
+          <CardDescription>
+            Fill out the form below and we'll get back to you as soon as
+            possible.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <ContactForm />
+        </CardContent>
+      </Card>
+    </div>
+  )
+}
+
+```
+
+File: /Users/denis/Repos/o1-pro-template-system/app/(auth)/layout.tsx
+```tsx
+/*
+This server layout provides a centered layout for (auth) pages.
+*/
+
+"use server"
+
+interface AuthLayoutProps {
+  children: React.ReactNode
+}
+
+export default async function AuthLayout({ children }: AuthLayoutProps) {
+  return (
+    <div className="flex h-screen items-center justify-center">{children}</div>
+  )
+}
+
+```
+
+File: /Users/denis/Repos/o1-pro-template-system/app/(marketing)/features/page.tsx
+```tsx
+/*
+This server page displays the main features and capabilities of the product.
+*/
+
+"use server"
+
+import { Card, CardContent } from "@/components/ui/card"
+import { BarChart, Clock, Settings, Shield, Users, Zap } from "lucide-react"
+
+interface FeatureProps {
+  title: string
+  description: string
+  icon: React.ReactNode
+}
+
+function Feature({ title, description, icon }: FeatureProps) {
+  return (
+    <Card>
+      <CardContent className="flex items-start gap-4 pt-6">
+        <div className="bg-primary text-primary-foreground rounded-lg p-2">
+          {icon}
+        </div>
+        <div>
+          <h3 className="mb-2 font-semibold">{title}</h3>
+          <p className="text-muted-foreground text-sm">{description}</p>
+        </div>
+      </CardContent>
+    </Card>
+  )
+}
+
+export default async function FeaturesPage() {
+  const features: FeatureProps[] = [
+    {
+      title: "Lightning Fast",
+      description:
+        "Optimized performance for quick load times and smooth interactions.",
+      icon: <Zap className="size-5" />
+    },
+    {
+      title: "Enterprise Security",
+      description:
+        "Bank-grade encryption and security measures to protect your data.",
+      icon: <Shield className="size-5" />
+    },
+    {
+      title: "Customizable",
+      description:
+        "Flexible settings and configurations to match your workflow.",
+      icon: <Settings className="size-5" />
+    },
+    {
+      title: "Team Collaboration",
+      description:
+        "Built-in tools for seamless team coordination and communication.",
+      icon: <Users className="size-5" />
+    },
+    {
+      title: "Real-time Updates",
+      description: "Stay synchronized with instant updates and notifications.",
+      icon: <Clock className="size-5" />
+    },
+    {
+      title: "Advanced Analytics",
+      description:
+        "Comprehensive insights and reporting to track your progress.",
+      icon: <BarChart className="size-5" />
+    }
+  ]
+
+  return (
+    <div className="container mx-auto py-12">
+      <h1 className="mb-8 text-center text-4xl font-bold">Features</h1>
+      <p className="text-muted-foreground mx-auto mb-12 max-w-2xl text-center">
+        Discover the powerful features that make our platform the perfect
+        solution for your needs.
+      </p>
+
+      <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
+        {features.map((feature, index) => (
+          <Feature key={index} {...feature} />
+        ))}
+      </div>
+    </div>
+  )
+}
+
+```
+
+File: /Users/denis/Repos/o1-pro-template-system/app/(auth)/login/[[...login]]/page.tsx
+```tsx
+/*
+This client page provides the login form from Clerk.
+*/
+
+"use client"
+
+import { SignIn } from "@clerk/nextjs"
+import { dark } from "@clerk/themes"
+import { useTheme } from "next-themes"
+
+export default function LoginPage() {
+  const { theme } = useTheme()
+
+  return (
+    <SignIn
+      forceRedirectUrl="/"
+      appearance={{ baseTheme: theme === "dark" ? dark : undefined }}
+    />
+  )
+}
+
+```
+
+File: /Users/denis/Repos/o1-pro-template-system/app/(marketing)/pricing/page.tsx
+```tsx
+/*
+This server page displays pricing options for the product, integrating Stripe payment links.
+*/
+
+"use server"
+
+import { Button } from "@/components/ui/button"
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardFooter,
+  CardHeader,
+  CardTitle
+} from "@/components/ui/card"
+import { cn } from "@/lib/utils"
+import { auth } from "@clerk/nextjs/server"
+import { Check } from "lucide-react"
+
+export default async function PricingPage() {
+  const { userId } = await auth()
+
+  const features = [
+    "All core features",
+    "Priority support",
+    "Advanced analytics",
+    "Custom integrations",
+    "API access",
+    "Team collaboration"
+  ]
+
+  return (
+    <div className="container mx-auto max-w-5xl px-4 py-12">
+      <div className="mx-auto mb-12 max-w-2xl text-center">
+        <h1 className="mb-4 text-4xl font-bold">Simple, Transparent Pricing</h1>
+        <p className="text-muted-foreground">
+          Choose the plan that best fits your needs. All plans include a 14-day
+          free trial.
+        </p>
+      </div>
+
+      <div className="mx-auto grid max-w-4xl grid-cols-1 gap-8 md:grid-cols-2">
+        <PricingCard
+          title="Monthly Plan"
+          price="$10"
+          description="Perfect for individuals and small teams"
+          buttonText="Subscribe Monthly"
+          buttonLink={
+            process.env.NEXT_PUBLIC_STRIPE_PAYMENT_LINK_MONTHLY || "#"
+          }
+          features={features}
+          userId={userId}
+          popular={false}
+        />
+        <PricingCard
+          title="Yearly Plan"
+          price="$100"
+          description="Save 17% with annual billing"
+          buttonText="Subscribe Yearly"
+          buttonLink={process.env.NEXT_PUBLIC_STRIPE_PAYMENT_LINK_YEARLY || "#"}
+          features={features}
+          userId={userId}
+          popular={true}
+        />
+      </div>
+
+      <p className="text-muted-foreground mt-8 text-center text-sm">
+        All prices are in USD. Need a custom plan?{" "}
+        <a href="/contact" className="font-medium underline underline-offset-4">
+          Contact us
+        </a>
+      </p>
+    </div>
+  )
+}
+
+interface PricingCardProps {
+  title: string
+  price: string
+  description: string
+  buttonText: string
+  buttonLink: string
+  features: string[]
+  userId: string | null
+  popular: boolean
+}
+
+function PricingCard({
+  title,
+  price,
+  description,
+  buttonText,
+  buttonLink,
+  features,
+  userId,
+  popular
+}: PricingCardProps) {
+  const finalButtonLink = userId
+    ? `${buttonLink}?client_reference_id=${userId}`
+    : buttonLink
+
+  return (
+    <Card
+      className={cn(
+        "relative flex h-full flex-col",
+        popular && "border-primary shadow-lg"
+      )}
+    >
+      {popular && (
+        <div className="bg-primary text-primary-foreground absolute -top-4 left-1/2 -translate-x-1/2 rounded-full px-3 py-1 text-sm font-medium">
+          Most Popular
+        </div>
+      )}
+
+      <CardHeader>
+        <CardTitle className="text-2xl">{title}</CardTitle>
+        <CardDescription>{description}</CardDescription>
+      </CardHeader>
+
+      <CardContent className="grow">
+        <div className="mb-6 flex items-baseline justify-center gap-x-2">
+          <span className="text-5xl font-bold">{price}</span>
+          <span className="text-muted-foreground">/month</span>
+        </div>
+
+        <ul className="space-y-3">
+          {features.map((feature, index) => (
+            <li key={index} className="flex items-center gap-x-2">
+              <Check className="text-primary size-4" />
+              <span className="text-muted-foreground text-sm">{feature}</span>
+            </li>
+          ))}
+        </ul>
+      </CardContent>
+
+      <CardFooter>
+        <Button
+          className={cn(
+            "w-full",
+            popular && "bg-primary text-primary-foreground hover:bg-primary/90"
+          )}
+          asChild
+        >
+          <a
+            href={finalButtonLink}
+            className={cn(
+              "inline-flex items-center justify-center",
+              finalButtonLink === "#" && "pointer-events-none opacity-50"
+            )}
+          >
+            {buttonText}
+          </a>
+        </Button>
+      </CardFooter>
+    </Card>
+  )
+}
+
+```
+
+File: /Users/denis/Repos/o1-pro-template-system/app/(marketing)/layout.tsx
+```tsx
+/*
+This server layout provides a shared header and basic structure for (marketing) routes.
+*/
+
+"use server"
+
+import { Footer } from "@/components/landing/footer"
+import Header from "@/components/landing/header"
+
+export default async function MarketingLayout({
+  children
+}: {
+  children: React.ReactNode
+}) {
+  return (
+    <div className="flex min-h-screen flex-col">
+      <Header />
+      <div className="flex-1">{children}</div>
+      <Footer />
+    </div>
+  )
+}
+
+```
+
+File: /Users/denis/Repos/o1-pro-template-system/app/api/stripe/webhooks/route.ts
+```ts
+/*
+This API route handles Stripe webhook events to manage subscription status changes and updates user profiles accordingly.
+*/
+
+import {
+  manageSubscriptionStatusChange,
+  updateStripeCustomer
+} from "@/actions/stripe-actions"
+import { stripe } from "@/lib/stripe"
+import { headers } from "next/headers"
+import Stripe from "stripe"
+
+const relevantEvents = new Set([
+  "checkout.session.completed",
+  "customer.subscription.updated",
+  "customer.subscription.deleted"
+])
+
+export async function POST(req: Request) {
+  const body = await req.text()
+  const sig = (await headers()).get("Stripe-Signature") as string
+  const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET
+  let event: Stripe.Event
+
+  try {
+    if (!sig || !webhookSecret) {
+      throw new Error("Webhook secret or signature missing")
+    }
+
+    event = stripe.webhooks.constructEvent(body, sig, webhookSecret)
+  } catch (err: any) {
+    console.error(`Webhook Error: ${err.message}`)
+    return new Response(`Webhook Error: ${err.message}`, { status: 400 })
+  }
+
+  if (relevantEvents.has(event.type)) {
+    try {
+      switch (event.type) {
+        case "customer.subscription.updated":
+        case "customer.subscription.deleted":
+          await handleSubscriptionChange(event)
+          break
+
+        case "checkout.session.completed":
+          await handleCheckoutSession(event)
+          break
+
+        default:
+          throw new Error("Unhandled relevant event!")
+      }
+    } catch (error) {
+      console.error("Webhook handler failed:", error)
+      return new Response(
+        "Webhook handler failed. View your nextjs function logs.",
+        { status: 400 }
+      )
+    }
+  }
+
+  return new Response(JSON.stringify({ received: true }))
+}
+
+async function handleSubscriptionChange(event: Stripe.Event) {
+  const subscription = event.data.object as Stripe.Subscription
+  const productId = subscription.items.data[0].price.product as string
+  await manageSubscriptionStatusChange(
+    subscription.id,
+    subscription.customer as string,
+    productId
+  )
+}
+
+async function handleCheckoutSession(event: Stripe.Event) {
+  const checkoutSession = event.data.object as Stripe.Checkout.Session
+  if (checkoutSession.mode === "subscription") {
+    const subscriptionId = checkoutSession.subscription as string
+    await updateStripeCustomer(
+      checkoutSession.client_reference_id as string,
+      subscriptionId,
+      checkoutSession.customer as string
+    )
+
+    const subscription = await stripe.subscriptions.retrieve(subscriptionId, {
+      expand: ["default_payment_method"]
+    })
+
+    const productId = subscription.items.data[0].price.product as string
+    await manageSubscriptionStatusChange(
+      subscription.id,
+      subscription.customer as string,
+      productId
+    )
+  }
+}
+
+```
+
+File: /Users/denis/Repos/o1-pro-template-system/app/globals.css
+```css
+/*
+Global styles for the app.
+*/
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 0 0% 3.9%;
+    --card: 0 0% 100%;
+    --card-foreground: 0 0% 3.9%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 0 0% 3.9%;
+    --primary: 0 0% 9%;
+    --primary-foreground: 0 0% 98%;
+    --secondary: 0 0% 96.1%;
+    --secondary-foreground: 0 0% 9%;
+    --muted: 0 0% 96.1%;
+    --muted-foreground: 0 0% 45.1%;
+    --accent: 0 0% 96.1%;
+    --accent-foreground: 0 0% 9%;
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 0 0% 89.8%;
+    --input: 0 0% 89.8%;
+    --ring: 0 0% 3.9%;
+    --radius: 0.5rem;
+    --chart-1: 12 76% 61%;
+    --chart-2: 173 58% 39%;
+    --chart-3: 197 37% 24%;
+    --chart-4: 43 74% 66%;
+    --chart-5: 27 87% 67%;
+    --sidebar-background: 0 0% 98%;
+    --sidebar-foreground: 240 5.3% 26.1%;
+    --sidebar-primary: 240 5.9% 10%;
+    --sidebar-primary-foreground: 0 0% 98%;
+    --sidebar-accent: 240 4.8% 95.9%;
+    --sidebar-accent-foreground: 240 5.9% 10%;
+    --sidebar-border: 220 13% 91%;
+    --sidebar-ring: 217.2 91.2% 59.8%;
+  }
+
+  .dark {
+    --background: 0 0% 3.9%;
+    --foreground: 0 0% 98%;
+    --card: 0 0% 3.9%;
+    --card-foreground: 0 0% 98%;
+    --popover: 0 0% 3.9%;
+    --popover-foreground: 0 0% 98%;
+    --primary: 0 0% 98%;
+    --primary-foreground: 0 0% 9%;
+    --secondary: 0 0% 14.9%;
+    --secondary-foreground: 0 0% 98%;
+    --muted: 0 0% 14.9%;
+    --muted-foreground: 0 0% 63.9%;
+    --accent: 0 0% 14.9%;
+    --accent-foreground: 0 0% 98%;
+    --destructive: 0 62.8% 30.6%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 0 0% 14.9%;
+    --input: 0 0% 14.9%;
+    --ring: 0 0% 83.1%;
+    --chart-1: 220 70% 50%;
+    --chart-2: 160 60% 45%;
+    --chart-3: 30 80% 55%;
+    --chart-4: 280 65% 60%;
+    --chart-5: 340 75% 55%;
+    --sidebar-background: 240 5.9% 10%;
+    --sidebar-foreground: 240 4.8% 95.9%;
+    --sidebar-primary: 224.3 76.3% 48%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 240 3.7% 15.9%;
+    --sidebar-accent-foreground: 240 4.8% 95.9%;
+    --sidebar-border: 240 3.7% 15.9%;
+    --sidebar-ring: 217.2 91.2% 59.8%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+}
+
+```
+
+File: /Users/denis/Repos/o1-pro-template-system/app/(marketing)/page.tsx
+```tsx
+/*
+This server page is the marketing homepage.
+*/
+
+"use server"
+
+import { HeroSection } from "@/components/landing/hero"
+
+export default async function HomePage() {
+  return (
+    <div className="pb-20">
+      <HeroSection />
+    </div>
+  )
+}
+
+```
+
+File: /Users/denis/Repos/o1-pro-template-system/db/db.ts
+```ts
+/*
+Initializes the database connection and schema for the app.
+*/
+
+import { profilesTable } from "@/db/schema"
+import { config } from "dotenv"
+import { drizzle } from "drizzle-orm/postgres-js"
+import postgres from "postgres"
+
+config({ path: ".env.local" })
+
+const schema = { profiles: profilesTable }
+
+const client = postgres(process.env.DATABASE_URL!)
+
+export const db = drizzle(client, { schema })
+
+```
+
+File: /Users/denis/Repos/o1-pro-template-system/.env.example
+```example
+# DB
+DATABASE_URL=
+
+# Supabase
+SUPABASE_URL=
+SUPABASE_SERVICE_ROLE_KEY=
+SUPABASE_BUCKET_RECEIPTS=
+
+# Auth
+NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=
+CLERK_SECRET_KEY=
+NEXT_PUBLIC_CLERK_SIGN_IN_URL=/login
+NEXT_PUBLIC_CLERK_SIGN_UP_URL=/signup
+
+# Payments
+STRIPE_SECRET_KEY=
+STRIPE_WEBHOOK_SECRET=
+NEXT_PUBLIC_STRIPE_PAYMENT_LINK_YEARLY=
+NEXT_PUBLIC_STRIPE_PAYMENT_LINK_MONTHLY=
+
+# AI
+OPENAI_API_KEY=
+```
+
+File: /Users/denis/Repos/o1-pro-template-system/app/layout.tsx
+```tsx
+/*
+The root server layout for the app.
+*/
+
+import {
+  createProfileAction,
+  getProfileByUserIdAction
+} from "@/actions/db/profiles-actions"
+import { Toaster } from "@/components/ui/toaster"
+import { Providers } from "@/components/utilities/providers"
+import { TailwindIndicator } from "@/components/utilities/tailwind-indicator"
+import { cn } from "@/lib/utils"
+import { ClerkProvider } from "@clerk/nextjs"
+import { auth } from "@clerk/nextjs/server"
+import type { Metadata } from "next"
+import { Inter } from "next/font/google"
+import "./globals.css"
+
+const inter = Inter({ subsets: ["latin"] })
+
+export const metadata: Metadata = {
+  title: "Receipt AI",
+  description: "A full-stack web app template."
+}
+
+export default async function RootLayout({
+  children
+}: {
+  children: React.ReactNode
+}) {
+  const { userId } = await auth()
+
+  if (userId) {
+    const profileRes = await getProfileByUserIdAction(userId)
+    if (!profileRes.isSuccess) {
+      await createProfileAction({ userId })
+    }
+  }
+
+  return (
+    <ClerkProvider>
+      <html lang="en" suppressHydrationWarning>
+        <body
+          className={cn(
+            "bg-background mx-auto min-h-screen w-full scroll-smooth antialiased",
+            inter.className
+          )}
+        >
+          <Providers
+            attribute="class"
+            defaultTheme="light"
+            enableSystem={false}
+            disableTransitionOnChange
+          >
+            {children}
+
+            <TailwindIndicator />
+
+            <Toaster />
+          </Providers>
+        </body>
+      </html>
+    </ClerkProvider>
+  )
+}
+
+```
+
+File: /Users/denis/Repos/o1-pro-template-system/.eslintrc.json
+```json
+/*
+Contains the ESLint configuration for the app.
+*/
+
+{
+  "$schema": "https://json.schemastore.org/eslintrc",
+  "root": true,
+  "extends": [
+    "next/core-web-vitals",
+    "prettier",
+    "plugin:tailwindcss/recommended"
+  ],
+  "plugins": ["tailwindcss"],
+  "rules": {
+    "@next/next/no-img-element": "off",
+    "jsx-a11y/alt-text": "off",
+    "react-hooks/exhaustive-deps": "off",
+    "tailwindcss/enforces-negative-arbitrary-values": "off",
+    "tailwindcss/no-contradicting-classname": "off",
+    "tailwindcss/no-custom-classname": "off",
+    "tailwindcss/no-unnecessary-arbitrary-value": "off",
+    "react/no-unescaped-entities": "off"
+  },
+  "settings": {
+    "tailwindcss": { "callees": ["cn", "cva"], "config": "tailwind.config.js" }
+  },
+  "overrides": [
+    { "files": ["*.ts", "*.tsx"], "parser": "@typescript-eslint/parser" }
+  ]
+}
+
+```
+
+File: /Users/denis/Repos/o1-pro-template-system/types/index.ts
+```ts
+/*
+Exports the types for the app.
+*/
+
+export * from "./server-action-types"
+
+```
+
+File: /Users/denis/Repos/o1-pro-template-system/types/server-action-types.ts
+```ts
+/*
+Contains the general server action types.
+*/
+
+export type ActionState<T> =
+  | { isSuccess: true; message: string; data: T }
+  | { isSuccess: false; message: string; data?: never }
+
+```
+
+File: /Users/denis/Repos/o1-pro-template-system/db/schema/index.ts
+```ts
+/*
+Exports the database schema for the app.
+*/
+
+export * from "./profiles-schema"
+
+```
+
+File: /Users/denis/Repos/o1-pro-template-system/license
+```license
+MIT License
+
+Copyright (c) 2025 Mckay Wrigley
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+File: /Users/denis/Repos/o1-pro-template-system/db/schema/profiles-schema.ts
+```ts
+/*
+Defines the database schema for profiles.
+*/
+
+import { pgEnum, pgTable, text, timestamp } from "drizzle-orm/pg-core"
+
+export const membershipEnum = pgEnum("membership", ["free", "pro"])
+
+export const profilesTable = pgTable("profiles", {
+  userId: text("user_id").primaryKey().notNull(),
+  membership: membershipEnum("membership").notNull().default("free"),
+  stripeCustomerId: text("stripe_customer_id"),
+  stripeSubscriptionId: text("stripe_subscription_id"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at")
+    .defaultNow()
+    .notNull()
+    .$onUpdate(() => new Date())
+})
+
+export type InsertProfile = typeof profilesTable.$inferInsert
+export type SelectProfile = typeof profilesTable.$inferSelect
+
+```
+
+File: /Users/denis/Repos/o1-pro-template-system/drizzle.config.ts
+```ts
+/*
+Configures Drizzle for the app.
+*/
+
+import { config } from "dotenv"
+import { defineConfig } from "drizzle-kit"
+
+config({ path: ".env.local" })
+
+export default defineConfig({
+  schema: "./db/schema/index.ts",
+  out: "./db/migrations",
+  dialect: "postgresql",
+  dbCredentials: { url: process.env.DATABASE_URL! }
+})
+
+```
+
+File: /Users/denis/Repos/o1-pro-template-system/components.json
+```json
+{
+  "$schema": "https://ui.shadcn.com/schema.json",
+  "style": "default",
+  "rsc": true,
+  "tsx": true,
+  "tailwind": {
+    "config": "tailwind.config.ts",
+    "css": "app/globals.css",
+    "baseColor": "neutral",
+    "cssVariables": true,
+    "prefix": ""
+  },
+  "aliases": {
+    "components": "@/components",
+    "utils": "@/lib/utils",
+    "ui": "@/components/ui",
+    "lib": "@/lib",
+    "hooks": "@/lib/hooks"
+  }
+}
+
+```
+
+File: /Users/denis/Repos/o1-pro-template-system/middleware.ts
+```ts
+/*
+Contains middleware for protecting routes, checking user authentication, and redirecting as needed.
+*/
+
+import { clerkMiddleware, createRouteMatcher } from "@clerk/nextjs/server"
+import { NextResponse } from "next/server"
+
+const isProtectedRoute = createRouteMatcher(["/todo(.*)"])
+
+export default clerkMiddleware(async (auth, req) => {
+  const { userId, redirectToSignIn } = await auth()
+
+  // If the user isn't signed in and the route is private, redirect to sign-in
+  if (!userId && isProtectedRoute(req)) {
+    return redirectToSignIn({ returnBackUrl: "/login" })
+  }
+
+  // If the user is logged in and the route is protected, let them view.
+  if (userId && isProtectedRoute(req)) {
+    return NextResponse.next()
+  }
+})
+
+export const config = {
+  matcher: ["/((?!.*\\..*|_next).*)", "/", "/(api|trpc)(.*)"]
+}
+
+```
+
+File: /Users/denis/Repos/o1-pro-template-system/next.config.mjs
+```mjs
+/*
+Configures Next.js for the app.
+*/
+
+/** @type {import('next').NextConfig} */
+const nextConfig = { images: { remotePatterns: [{ hostname: "localhost" }] } }
+
+export default nextConfig
+
+```
+
+File: /Users/denis/Repos/o1-pro-template-system/prettier.config.cjs
+```cjs
+/*
+Configures Prettier for the app.
+*/
+
+/** @type {import('prettier').Config} */
+module.exports = {
+  endOfLine: "lf",
+  semi: false,
+  useTabs: false,
+  singleQuote: false,
+  arrowParens: "avoid",
+  tabWidth: 2,
+  trailingComma: "none",
+  importOrder: [
+    "^.+\\.scss$",
+    "^.+\\.css$",
+    "^(react/(.*)$)|^(react$)",
+    "^(next/(.*)$)|^(next$)",
+    "<THIRD_PARTY_MODULES>",
+    "",
+    "^types$",
+    "^@/types/(.*)$",
+    "^@/config/(.*)$",
+    "^@/lib/(.*)$",
+    "^@/hooks/(.*)$",
+    "^@/components/ui/(.*)$",
+    "^@/components/(.*)$",
+    "^@/registry/(.*)$",
+    "^@/styles/(.*)$",
+    "^@/app/(.*)$",
+    "",
+    "^[./]"
+  ],
+  importOrderSeparation: false,
+  importOrderSortSpecifiers: true,
+  importOrderBuiltinModulesToTop: true,
+  importOrderParserPlugins: ["typescript", "jsx", "decorators-legacy"],
+  importOrderMergeDuplicateImports: true,
+  importOrderCombineTypeAndValueImports: true
+}
+
+```
+
+File: /Users/denis/Repos/o1-pro-template-system/postcss.config.mjs
+```mjs
+/*
+Configures PostCSS for the app.
+*/
+
+/** @type {import('postcss-load-config').Config} */
+const config = { plugins: { tailwindcss: {} } }
+
+export default config
+
+```
+
+File: /Users/denis/Repos/o1-pro-template-system/tsconfig.json
+```json
+/*
+Configures the TypeScript compiler options for the app.
+*/
+
+{
+  "compilerOptions": {
+    "lib": ["dom", "dom.iterable", "esnext"],
+    "allowJs": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "noEmit": true,
+    "esModuleInterop": true,
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "jsx": "preserve",
+    "incremental": true,
+    "plugins": [{ "name": "next" }],
+    "paths": { "@/*": ["./*"] },
+    "target": "ES2017"
+  },
+  "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx", ".next/types/**/*.ts"],
+  "exclude": ["node_modules"]
+}
+
+```
+
+File: /Users/denis/Repos/o1-pro-template-system/tailwind.config.ts
+```ts
+/*
+Configures Tailwind CSS for the app.
+*/
+
+import type { Config } from "tailwindcss"
+
+const config = {
+  darkMode: ["class"],
+  content: [
+    "./pages/**/*.{ts,tsx}",
+    "./components/**/*.{ts,tsx}",
+    "./app/**/*.{ts,tsx}",
+    "./src/**/*.{ts,tsx}"
+  ],
+  prefix: "",
+  theme: {
+    container: { center: true, padding: "2rem", screens: { "2xl": "1400px" } },
+    extend: {
+      colors: {
+        border: "hsl(var(--border))",
+        input: "hsl(var(--input))",
+        ring: "hsl(var(--ring))",
+        background: "hsl(var(--background))",
+        foreground: "hsl(var(--foreground))",
+        primary: {
+          DEFAULT: "hsl(var(--primary))",
+          foreground: "hsl(var(--primary-foreground))"
+        },
+        secondary: {
+          DEFAULT: "hsl(var(--secondary))",
+          foreground: "hsl(var(--secondary-foreground))"
+        },
+        destructive: {
+          DEFAULT: "hsl(var(--destructive))",
+          foreground: "hsl(var(--destructive-foreground))"
+        },
+        muted: {
+          DEFAULT: "hsl(var(--muted))",
+          foreground: "hsl(var(--muted-foreground))"
+        },
+        accent: {
+          DEFAULT: "hsl(var(--accent))",
+          foreground: "hsl(var(--accent-foreground))"
+        },
+        popover: {
+          DEFAULT: "hsl(var(--popover))",
+          foreground: "hsl(var(--popover-foreground))"
+        },
+        card: {
+          DEFAULT: "hsl(var(--card))",
+          foreground: "hsl(var(--card-foreground))"
+        },
+        sidebar: {
+          DEFAULT: "hsl(var(--sidebar-background))",
+          foreground: "hsl(var(--sidebar-foreground))",
+          primary: "hsl(var(--sidebar-primary))",
+          "primary-foreground": "hsl(var(--sidebar-primary-foreground))",
+          accent: "hsl(var(--sidebar-accent))",
+          "accent-foreground": "hsl(var(--sidebar-accent-foreground))",
+          border: "hsl(var(--sidebar-border))",
+          ring: "hsl(var(--sidebar-ring))"
+        }
+      },
+      borderRadius: {
+        lg: "var(--radius)",
+        md: "calc(var(--radius) - 2px)",
+        sm: "calc(var(--radius) - 4px)"
+      },
+      keyframes: {
+        "accordion-down": {
+          from: { height: "0" },
+          to: { height: "var(--radix-accordion-content-height)" }
+        },
+        "accordion-up": {
+          from: { height: "var(--radix-accordion-content-height)" },
+          to: { height: "0" }
+        },
+        gradient: { to: { backgroundPosition: "var(--bg-size) 0" } }
+      },
+      animation: {
+        "accordion-down": "accordion-down 0.2s ease-out",
+        "accordion-up": "accordion-up 0.2s ease-out",
+        gradient: "gradient 8s linear infinite"
+      }
+    }
+  },
+  plugins: [
+    require("tailwindcss-animate"),
+    require("@tailwindcss/typography"),
+    require("@tailwindcss/postcss")
+  ]
+} satisfies Config
+
+export default config
+
+```
+
+File: /Users/denis/Repos/o1-pro-template-system/lib/hooks/use-mobile.tsx
+```tsx
+/*
+Hook to check if the user is on a mobile device.
+*/
+
+import * as React from "react"
+
+const MOBILE_BREAKPOINT = 768
+
+export function useIsMobile() {
+  const [isMobile, setIsMobile] = React.useState<boolean | undefined>(undefined)
+
+  React.useEffect(() => {
+    const mql = window.matchMedia(`(max-width: ${MOBILE_BREAKPOINT - 1}px)`)
+    const onChange = () => {
+      setIsMobile(window.innerWidth < MOBILE_BREAKPOINT)
+    }
+    mql.addEventListener("change", onChange)
+    setIsMobile(window.innerWidth < MOBILE_BREAKPOINT)
+    return () => mql.removeEventListener("change", onChange)
+  }, [])
+
+  return !!isMobile
+}
+
+```
+
+File: /Users/denis/Repos/o1-pro-template-system/lib/stripe.ts
+```ts
+/*
+Contains the Stripe configuration for the app.
+*/
+
+import Stripe from "stripe"
+
+export const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, {
+  apiVersion: "2025-01-27.acacia",
+  appInfo: { name: "Receipt AI", version: "0.1.0" }
+})
+
+```
+
+File: /Users/denis/Repos/o1-pro-template-system/lib/utils.ts
+```ts
+/*
+Contains the utility functions for the app.
+*/
+
+import { type ClassValue, clsx } from "clsx"
+import { twMerge } from "tailwind-merge"
+
+export function cn(...inputs: ClassValue[]) {
+  return twMerge(clsx(inputs))
+}
+
+```
+
+File: /Users/denis/Repos/o1-pro-template-system/lib/hooks/use-copy-to-clipboard.tsx
+```tsx
+/*
+Hook for copying text to the clipboard.
+*/
+
+"use client"
+
+import { useState } from "react"
+
+export interface useCopyToClipboardProps {
+  timeout?: number
+}
+
+export function useCopyToClipboard({
+  timeout = 2000
+}: useCopyToClipboardProps) {
+  const [isCopied, setIsCopied] = useState<Boolean>(false)
+
+  const copyToClipboard = (value: string) => {
+    if (typeof window === "undefined" || !navigator.clipboard?.writeText) {
+      return
+    }
+
+    if (!value) {
+      return
+    }
+
+    navigator.clipboard.writeText(value).then(() => {
+      setIsCopied(true)
+
+      setTimeout(() => {
+        setIsCopied(false)
+      }, timeout)
+    })
+  }
+
+  return { isCopied, copyToClipboard }
+}
+
+```
+
+File: /Users/denis/Repos/o1-pro-template-system/package.json
+```json
+{
+  "name": "receipt-ai",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "clean": "npm run lint:fix && npm run format:write",
+    "type-check": "tsc --noEmit",
+    "lint:fix": "next lint --fix",
+    "format:write": "prettier --write \"{app,lib,db,components,context,types}/**/*.{ts,tsx}\" --cache",
+    "format:check": "prettier --check \"{app,lib,db,components,context,types}**/*.{ts,tsx}\" --cache",
+    "analyze": "ANALYZE=true npm run build",
+    "db:generate": "npx drizzle-kit generate",
+    "db:migrate": "npx drizzle-kit migrate",
+    "prepare": "husky install"
+  },
+  "dependencies": {
+    "@clerk/backend": "^1.24.0",
+    "@clerk/nextjs": "^6.11.2",
+    "@clerk/themes": "^2.2.17",
+    "@hookform/resolvers": "^4.0.0",
+    "@radix-ui/react-accordion": "^1.2.3",
+    "@radix-ui/react-alert-dialog": "^1.1.6",
+    "@radix-ui/react-aspect-ratio": "^1.1.2",
+    "@radix-ui/react-avatar": "^1.1.3",
+    "@radix-ui/react-checkbox": "^1.1.4",
+    "@radix-ui/react-collapsible": "^1.1.3",
+    "@radix-ui/react-context-menu": "^2.2.6",
+    "@radix-ui/react-dialog": "^1.1.6",
+    "@radix-ui/react-dropdown-menu": "^2.1.6",
+    "@radix-ui/react-hover-card": "^1.1.6",
+    "@radix-ui/react-label": "^2.1.2",
+    "@radix-ui/react-menubar": "^1.1.6",
+    "@radix-ui/react-navigation-menu": "^1.2.5",
+    "@radix-ui/react-popover": "^1.1.6",
+    "@radix-ui/react-progress": "^1.1.2",
+    "@radix-ui/react-radio-group": "^1.2.3",
+    "@radix-ui/react-scroll-area": "^1.2.3",
+    "@radix-ui/react-select": "^2.1.6",
+    "@radix-ui/react-separator": "^1.1.2",
+    "@radix-ui/react-slider": "^1.2.3",
+    "@radix-ui/react-slot": "^1.1.2",
+    "@radix-ui/react-switch": "^1.1.3",
+    "@radix-ui/react-tabs": "^1.1.3",
+    "@radix-ui/react-toast": "^1.2.6",
+    "@radix-ui/react-toggle": "^1.1.2",
+    "@radix-ui/react-toggle-group": "^1.1.2",
+    "@radix-ui/react-tooltip": "^1.1.8",
+    "@tailwindcss/postcss": "^4.0.6",
+    "autoprefixer": "^10.4.20",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "cmdk": "^1.0.4",
+    "date-fns": "^4.1.0",
+    "drizzle-orm": "^0.39.3",
+    "embla-carousel-react": "^8.5.2",
+    "framer-motion": "^12.4.2",
+    "input-otp": "^1.4.2",
+    "lucide-react": "^0.475.0",
+    "next": "^15.1.7",
+    "next-themes": "^0.4.4",
+    "postcss": "^8.5.2",
+    "postgres": "^3.4.5",
+    "react": "^19.0",
+    "react-day-picker": "^8.10.1",
+    "react-dom": "^19.0",
+    "react-hook-form": "^7.54.2",
+    "react-resizable-panels": "^2.1.7",
+    "recharts": "^2.15.1",
+    "sonner": "^1.7.4",
+    "stripe": "^17.6.0",
+    "tailwind-merge": "^3.0.1",
+    "tailwindcss": "^3.4.17",
+    "tailwindcss-animate": "^1.0.7",
+    "vaul": "^1.1.2",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@tailwindcss/typography": "^0.5.16",
+    "@types/node": "^22",
+    "@types/react": "^19.0",
+    "@types/react-dom": "^19.0",
+    "dotenv": "^16.4.7",
+    "drizzle-kit": "^0.30.4",
+    "eslint": "^9",
+    "eslint-config-next": "15.1.7",
+    "eslint-config-prettier": "^10.0.1",
+    "eslint-plugin-tailwindcss": "^3.18.0",
+    "husky": "^9.1.7",
+    "prettier": "^3.5.0",
+    "typescript": "^5"
+  }
+}
+
+```
+
+File: /Users/denis/Repos/o1-pro-template-system/lib/hooks/use-toast.ts
+```ts
+/*
+Hook to display toast notifications.
+*/
+
+"use client"
+
+// Inspired by react-hot-toast library
+import * as React from "react"
+
+import type { ToastActionElement, ToastProps } from "@/components/ui/toast"
+
+const TOAST_LIMIT = 1
+const TOAST_REMOVE_DELAY = 1000000
+
+type ToasterToast = ToastProps & {
+  id: string
+  title?: React.ReactNode
+  description?: React.ReactNode
+  action?: ToastActionElement
+}
+
+const actionTypes = {
+  ADD_TOAST: "ADD_TOAST",
+  UPDATE_TOAST: "UPDATE_TOAST",
+  DISMISS_TOAST: "DISMISS_TOAST",
+  REMOVE_TOAST: "REMOVE_TOAST"
+} as const
+
+let count = 0
+
+function genId() {
+  count = (count + 1) % Number.MAX_SAFE_INTEGER
+  return count.toString()
+}
+
+type ActionType = typeof actionTypes
+
+type Action =
+  | { type: ActionType["ADD_TOAST"]; toast: ToasterToast }
+  | { type: ActionType["UPDATE_TOAST"]; toast: Partial<ToasterToast> }
+  | { type: ActionType["DISMISS_TOAST"]; toastId?: ToasterToast["id"] }
+  | { type: ActionType["REMOVE_TOAST"]; toastId?: ToasterToast["id"] }
+
+interface State {
+  toasts: ToasterToast[]
+}
+
+const toastTimeouts = new Map<string, ReturnType<typeof setTimeout>>()
+
+const addToRemoveQueue = (toastId: string) => {
+  if (toastTimeouts.has(toastId)) {
+    return
+  }
+
+  const timeout = setTimeout(() => {
+    toastTimeouts.delete(toastId)
+    dispatch({ type: "REMOVE_TOAST", toastId: toastId })
+  }, TOAST_REMOVE_DELAY)
+
+  toastTimeouts.set(toastId, timeout)
+}
+
+export const reducer = (state: State, action: Action): State => {
+  switch (action.type) {
+    case "ADD_TOAST":
+      return {
+        ...state,
+        toasts: [action.toast, ...state.toasts].slice(0, TOAST_LIMIT)
+      }
+
+    case "UPDATE_TOAST":
+      return {
+        ...state,
+        toasts: state.toasts.map(t =>
+          t.id === action.toast.id ? { ...t, ...action.toast } : t
+        )
+      }
+
+    case "DISMISS_TOAST": {
+      const { toastId } = action
+
+      // ! Side effects ! - This could be extracted into a dismissToast() action,
+      // but I'll keep it here for simplicity
+      if (toastId) {
+        addToRemoveQueue(toastId)
+      } else {
+        state.toasts.forEach(toast => {
+          addToRemoveQueue(toast.id)
+        })
+      }
+
+      return {
+        ...state,
+        toasts: state.toasts.map(t =>
+          t.id === toastId || toastId === undefined ? { ...t, open: false } : t
+        )
+      }
+    }
+    case "REMOVE_TOAST":
+      if (action.toastId === undefined) {
+        return { ...state, toasts: [] }
+      }
+      return {
+        ...state,
+        toasts: state.toasts.filter(t => t.id !== action.toastId)
+      }
+  }
+}
+
+const listeners: Array<(state: State) => void> = []
+
+let memoryState: State = { toasts: [] }
+
+function dispatch(action: Action) {
+  memoryState = reducer(memoryState, action)
+  listeners.forEach(listener => {
+    listener(memoryState)
+  })
+}
+
+type Toast = Omit<ToasterToast, "id">
+
+function toast({ ...props }: Toast) {
+  const id = genId()
+
+  const update = (props: ToasterToast) =>
+    dispatch({ type: "UPDATE_TOAST", toast: { ...props, id } })
+  const dismiss = () => dispatch({ type: "DISMISS_TOAST", toastId: id })
+
+  dispatch({
+    type: "ADD_TOAST",
+    toast: {
+      ...props,
+      id,
+      open: true,
+      onOpenChange: open => {
+        if (!open) dismiss()
+      }
+    }
+  })
+
+  return { id: id, dismiss, update }
+}
+
+function useToast() {
+  const [state, setState] = React.useState<State>(memoryState)
+
+  React.useEffect(() => {
+    listeners.push(setState)
+    return () => {
+      const index = listeners.indexOf(setState)
+      if (index > -1) {
+        listeners.splice(index, 1)
+      }
+    }
+  }, [state])
+
+  return {
+    ...state,
+    toast,
+    dismiss: (toastId?: string) => dispatch({ type: "DISMISS_TOAST", toastId })
+  }
+}
+
+export { toast, useToast }
+
+```
+</file_contents>
+
